@@ -1,9 +1,8 @@
 import Cocoa
-import IOKit.hid
 import Carbon.HIToolbox
 
 final class TecladoPC: Feature {
-    private var gerente: IOHIDManager?
+    private var timer: Timer?
     private var aplicados: Set<String> = []
 
     private static let fabricanteApple = 0x05AC
@@ -21,47 +20,48 @@ final class TecladoPC: Feature {
     }
 
     override func ativar() -> Bool {
-        let g = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let filtro: [String: Int] = [kIOHIDPrimaryUsagePageKey: kHIDPage_GenericDesktop,
-                                     kIOHIDPrimaryUsageKey: kHIDUsage_GD_Keyboard]
-        IOHIDManagerSetDeviceMatching(g, filtro as CFDictionary)
-        let contexto = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterDeviceMatchingCallback(g, { contexto, _, _, _ in
-            guard let contexto = contexto else { return }
-            let eu = Unmanaged<TecladoPC>.fromOpaque(contexto).takeUnretainedValue()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { eu.varrer() }
-        }, contexto)
-        IOHIDManagerScheduleWithRunLoop(g, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        IOHIDManagerOpen(g, IOOptionBits(kIOHIDOptionsTypeNone))
-        gerente = g
         varrer()
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.varrer() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
         return true
     }
 
     override func desativar() {
+        timer?.invalidate()
+        timer = nil
         for id in aplicados {
             let partes = id.split(separator: "-").compactMap { Int($0) }
             if partes.count == 2 { aplicarHidutil(vendor: partes[0], produto: partes[1], json: TecladoPC.semMapeamento) }
         }
         aplicados.removeAll()
-        if let g = gerente {
-            IOHIDManagerUnscheduleFromRunLoop(g, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-            IOHIDManagerClose(g, IOOptionBits(kIOHIDOptionsTypeNone))
-        }
-        gerente = nil
     }
 
     private func varrer() {
-        guard ativo, let g = gerente, let conjunto = IOHIDManagerCopyDevices(g) as? Set<IOHIDDevice> else { return }
-        for dispositivo in conjunto {
-            guard let vendor = IOHIDDeviceGetProperty(dispositivo, kIOHIDVendorIDKey as CFString) as? Int,
-                  let produto = IOHIDDeviceGetProperty(dispositivo, kIOHIDProductIDKey as CFString) as? Int else { continue }
-            if vendor == TecladoPC.fabricanteApple { continue }
+        for (vendor, produto) in tecladosExternos() {
             let id = "\(vendor)-\(produto)"
             if aplicados.contains(id) || jaRemapeadoPeloSistema(vendor: vendor, produto: produto) { continue }
             aplicarHidutil(vendor: vendor, produto: produto, json: TecladoPC.mapeamento)
             aplicados.insert(id)
         }
+    }
+
+    private func tecladosExternos() -> [(Int, Int)] {
+        let saida = Shell.rodar("/usr/bin/hidutil", ["list", "--matching", "{\"PrimaryUsagePage\":1,\"PrimaryUsage\":6}"])
+        var encontrados: [(Int, Int)] = []
+        var secaoServicos = false
+        for linha in saida.split(separator: "\n") {
+            if linha.hasPrefix("Services:") { secaoServicos = true; continue }
+            if linha.hasPrefix("Devices:") { secaoServicos = false; continue }
+            guard secaoServicos else { continue }
+            let colunas = linha.split(separator: " ", omittingEmptySubsequences: true)
+            guard colunas.count >= 2, colunas[0].hasPrefix("0x"), colunas[1].hasPrefix("0x"),
+                  let vendor = Int(colunas[0].dropFirst(2), radix: 16),
+                  let produto = Int(colunas[1].dropFirst(2), radix: 16) else { continue }
+            if vendor == TecladoPC.fabricanteApple { continue }
+            if !encontrados.contains(where: { $0.0 == vendor && $0.1 == produto }) { encontrados.append((vendor, produto)) }
+        }
+        return encontrados
     }
 
     private func jaRemapeadoPeloSistema(vendor: Int, produto: Int) -> Bool {
