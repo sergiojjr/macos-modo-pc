@@ -21,7 +21,7 @@ final class TecladoPC: Feature {
 
     override func ativar() -> Bool {
         varrer()
-        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.varrer() }
+        let t = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.varrer() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
         return true
@@ -39,11 +39,18 @@ final class TecladoPC: Feature {
 
     private func varrer() {
         for (vendor, produto) in tecladosExternos() {
-            let id = "\(vendor)-\(produto)"
-            if aplicados.contains(id) || jaRemapeadoPeloSistema(vendor: vendor, produto: produto) { continue }
-            aplicarHidutil(vendor: vendor, produto: produto, json: TecladoPC.mapeamento)
-            aplicados.insert(id)
+            if jaRemapeadoPeloSistema(vendor: vendor, produto: produto) { continue }
+            aplicados.insert("\(vendor)-\(produto)")
+            if !mapeamentoCompleto(vendor: vendor, produto: produto) {
+                aplicarHidutil(vendor: vendor, produto: produto, json: TecladoPC.mapeamento)
+            }
         }
+    }
+
+    private func mapeamentoCompleto(vendor: Int, produto: Int) -> Bool {
+        let filtro = "{\"VendorID\":\(vendor),\"ProductID\":\(produto)}"
+        let saida = Shell.rodar("/usr/bin/hidutil", ["property", "--matching", filtro, "--get", "UserKeyMapping"])
+        return saida.contains("HIDKeyboardModifierMappingDst") && !saida.contains("(null)")
     }
 
     private func tecladosExternos() -> [(Int, Int)] {
